@@ -430,8 +430,7 @@ void helper_cbo_inval_cap(CPURISCVState *env, uint32_t addr_reg)
     address &= ~(cbomlen - 1);
 
     /* Check if any of the bytes are outside the bounds */
-    if ((cap_get_top_full(auth_cap) < address) ||
-        (cap_get_base(auth_cap) > (address + cbomlen))) {
+    if (!cap_is_in_bounds(auth_cap, address, cbomlen)) {
         raise_cheri_exception(env, CapEx_LengthViolation, addr_reg);
     }
     check_zicbom_access(env, address, _host_return_address);
