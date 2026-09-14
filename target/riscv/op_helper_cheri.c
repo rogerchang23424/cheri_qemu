@@ -318,9 +318,45 @@ void HELPER(amoswap_cap)(CPUArchState *env, uint32_t dest_reg,
     } else if (!QEMU_IS_ALIGNED(addr, CHERI_CAP_SIZE)) {
         raise_unaligned_store_exception(env, addr, _host_return_address);
     }
-    if (addr == env->load_res) {
-        env->load_res = -1; // Invalidate LR/SC to the same address
+    bool val_tag = get_capreg_tag_filtered(env, val_reg);
+#if defined(TARGET_CHERI_RISCV_STD)
+    RISCVCPU *cpu = env_archcpu(env);
+    if (!cap_has_perms(cbp, CAP_PERM_STORE_CAP)) {
+        val_tag = false;
     }
+    if ((cpu->cfg.lvbits > 0) && !cap_has_perms(cbp, CAP_PERM_STORE_LOCAL)) {
+        const cap_register_t *csp = get_capreg_or_special(env, val_reg);
+        if (!cap_has_perms(csp, CAP_PERM_GLOBAL)) {
+            val_tag = false;
+        }
+    }
+#endif
+
+    int mmu_idx = cpu_mmu_index(env, false);
+    if (val_tag) {
+        probe_cap_write(env, addr, CHERI_CAP_SIZE, mmu_idx, _host_return_address);
+    } else {
+        probe_write(env, addr, CHERI_CAP_SIZE, mmu_idx, _host_return_address);
+    }
+
+    void *phost;
+    int flags = probe_access_flags(env, addr, MMU_DATA_LOAD, mmu_idx,
+                                   true, &phost, _host_return_address);
+    if (unlikely(flags & TLB_INVALID_MASK)) {
+        /*
+         * The store probe already succeeded, which means page table translation
+         * succeeded (and Sv39/48/57 page tables require R=1 for any valid W=1 page).
+         * Therefore, a failure in probe_access_flags for MMU_DATA_LOAD must be due
+         * to PMP denying read permission.
+         * For AMO instructions, any access fault must be Store/AMO access fault.
+         */
+        env->badaddr = addr;
+        env->two_stage_lookup = riscv_cpu_virt_enabled(env) ||
+                                riscv_cpu_two_stage_lookup(mmu_idx);
+        riscv_raise_exception(env, RISCV_EXCP_STORE_AMO_ACCESS_FAULT,
+                              _host_return_address);
+    }
+
     // Load the value to store from the register file now in case the
     // load_cap_from_memory call overwrites that register
     target_ulong loaded_pesbt;
@@ -328,6 +364,11 @@ void HELPER(amoswap_cap)(CPUArchState *env, uint32_t dest_reg,
     bool loaded_tag =
         load_cap_from_memory_raw(env, &loaded_pesbt, &loaded_cursor, addr_reg,
                                  cbp, addr, _host_return_address, NULL);
+
+    if (addr == env->load_res) {
+        env->load_res = -1; // Invalidate LR/SC to the same address
+    }
+
     // The store may still trap, so we must only update the dest register after
     // the store succeeded.
     store_cap_to_memory(env, val_reg, addr_reg, addr, _host_return_address);
